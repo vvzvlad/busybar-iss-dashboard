@@ -2,7 +2,7 @@
   "name": "busybar-iss-dashboard",
   "private": true,
   "version": "0.1.0",
-  "description": "Live ISS telemetry: water tanks, cabin air, solar arrays, reboosts.",
+  "description": "The ISS water tanks live: urine, waste water and clean water.",
   "author": "vvzvlad",
   "type": "module",
   "scripts": {

@@ -6,7 +6,7 @@ A JavaScript app for [BUSY Bar](https://busy.app). Work in progress.
 
 ## What it does
 
-- Plumbing: the urine, waste water and clean water tanks side by side, with the state of the water processors.
+- Plumbing: the urine, waste water and clean water tanks side by side, with the state of the water processors, then each tank on the whole display: sloshing yellow urine with rising bubbles, a garbage heap of waste, sloshing blue clean water.
 - Cabin air: temperature, pressure and CO2 aboard the station.
 - Solar arrays: a live animation of the arrays turning, from the real joint angles, and the current beta angle.
 - Reboost alert: when the station switches into reboost mode, an alert pops up over any view with a sound and the status light.
