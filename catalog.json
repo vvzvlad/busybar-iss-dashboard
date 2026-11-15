@@ -1,0 +1,6 @@
+{
+  "category": "info-feeds",
+  "short_description": "The water tanks of the International Space Station, live: urine, waste water and clean water.",
+  "description": "Live telemetry from the ISS on your desk.\n\n## What you see\n\n- The three tanks side by side: urine, waste water and clean water, each with its level.\n- Turn the wheel to see one tank on the whole screen: clean water sloshes in blue, urine in yellow with rising bubbles, and waste water is a heap of garbage as tall as its level.\n\n## Data\n\nNASA's public ISS telemetry (ISSLIVE) through Lightstreamer, no key needed, checked every five minutes.",
+  "changelog": "First release: the urine, waste water and clean water tanks, each also on the whole screen."
+}
