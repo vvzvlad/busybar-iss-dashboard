@@ -4,6 +4,6 @@
   "name": "ISS Dashboard",
   "version": "0.1.0",
   "api_version": "27.12.0",
-  "description": "The ISS water tanks live: urine, waste water and clean water.",
+  "description": "Live ISS telemetry: the water tanks, cabin air, the solar arrays and a reboost alert.",
   "author": "vvzvlad"
 }

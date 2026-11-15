@@ -4,10 +4,13 @@ import type { DisplayDrawParams } from "@busy-app/busy-lib";
 /** One display element as DisplayDraw takes it. */
 export type Element = DisplayDrawParams["elements"][number];
 
-/** Front display of the app. */
+/** The app's displays: the front one, and the back one for elements with display "back". */
 export interface Screen {
-  /** Draws a whole frame: only its elements that changed are sent, those of the previous frame not in it are cleared. */
-  show(elements: Element[]): void;
+  /**
+   * Draws a whole frame: only its elements that changed are sent, those of the previous frame not in it are cleared.
+   * With led, a "#RRGGBBAA" colour, the status LED blinks it as the next changed elements are drawn.
+   */
+  show(elements: Element[], led?: string): void;
   /** Stops drawing: frames asked for after this are dropped. */
   close(): void;
 }
@@ -20,6 +23,8 @@ export function createScreen(app: string, report: (err: unknown) => void): Scree
   /** What is on the display: element id → its description as last sent. */
   const shown = new Map<string, string>();
   let next: Element[] | null = null;
+  /** The colour the LED blinks with the next draw sent: a frame that replaces the one asking for it keeps it waiting. */
+  let blink: string | undefined;
   let busy = false;
   let closed = false;
   /** False after a failed request: what the display holds is unknown until the next frame starts over. */
@@ -41,7 +46,11 @@ export function createScreen(app: string, report: (err: unknown) => void): Scree
         const changed = elements.filter((e) => shown.get(e.id) !== JSON.stringify(e));
         known = false;
         // Drawn before the old ones are cleared: clearing all of them first would close the app's screen for a moment.
-        if (changed.length > 0) await device.DisplayDraw({ application_name: app, priority: 50, elements: changed });
+        if (changed.length > 0) {
+          const led = blink;
+          blink = undefined;
+          await device.DisplayDraw({ application_name: app, priority: 50, elements: changed, led_notification_color: led });
+        }
         for (const e of changed) shown.set(e.id, JSON.stringify(e));
         if (gone.length > 0) await device.DisplayClear({ application_name: app, element_ids: gone });
         for (const id of gone) shown.delete(id);
@@ -54,9 +63,10 @@ export function createScreen(app: string, report: (err: unknown) => void): Scree
   }
 
   return {
-    show(elements) {
+    show(elements, led) {
       if (closed) return;
       next = elements;
+      if (led) blink = led;
       if (!busy) void flush();
     },
     close() {
