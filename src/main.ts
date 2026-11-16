@@ -197,10 +197,15 @@ const TURN_MS = 1000;
 const TURN_SPAN_MS = 20 * 60 * 1000;
 /**
  * The liquids slosh in place, nothing runs along the tank: the surface rises at one end as it falls at the other, and a
- * ripple of a third of the tank rises and falls on it twice as fast. WAVE_STEP is how far the slosh goes on a step, a
- * whole one being 2π; WAVE_AMP the most rows the surface goes up or down from its level.
+ * ripple of a third of the tank rises and falls on it twice as fast. They are jolted at random: on a step, with
+ * JOLT_CHANCE, the slosh and the ripple get a random strength, up to SLOSH_MAX and RIPPLE_MAX rows, and the slosh a
+ * random pace, how far it goes on a step, a whole slosh being 2π; between jolts both die down by DAMP a step.
+ * WAVE_AMP, their sum, is the most rows the surface goes up or down from its level.
  */
-const WAVE_STEP = 0.5;
+const JOLT_CHANCE = 0.04;
+const SLOSH_MAX = 1.4;
+const RIPPLE_MAX = 0.6;
+const DAMP = 0.97;
 const WAVE_AMP = 2;
 /** Across the tank, column by column, the shape of the slosh and of the ripple: cos(πx/71) and cos(3πx/71). */
 const SLOSH: number[] = [];
@@ -382,15 +387,29 @@ function tank(i: number, level: number | null): Element[] {
   return elements;
 }
 
-/** The motion of the liquids: the phase of the slosh and the bubbles in the urine, by column and row. */
+/**
+ * The motion of the liquids: the phase of the slosh, its pace a step, its strength and the ripple's in rows, and the
+ * bubbles in the urine, by column and row.
+ */
 interface Motion {
   phase: number;
+  pace: number;
+  slosh: number;
+  ripple: number;
   bubbles: { x: number; y: number }[];
 }
 
+/** A jolt: the slosh and the ripple get a random strength, at least what is left of the last one, and a random pace. */
+function jolt(motion: Motion): void {
+  motion.slosh = Math.max(motion.slosh, SLOSH_MAX * (0.3 + 0.7 * Math.random()));
+  motion.ripple = Math.max(motion.ripple, RIPPLE_MAX * Math.random());
+  motion.pace = 0.35 + 0.3 * Math.random();
+}
+
 /** The top lit row of column x of a liquid h rows deep: the level, raised or lowered there by the slosh. */
-function surface(x: number, h: number, phase: number): number {
-  const wave = Math.round(1.4 * SLOSH[x] * Math.sin(phase) + 0.6 * RIPPLE[x] * Math.sin(2 * phase));
+function surface(x: number, h: number, motion: Motion): number {
+  const p = motion.phase;
+  const wave = Math.round(motion.slosh * SLOSH[x] * Math.sin(p) + motion.ripple * RIPPLE[x] * Math.sin(2 * p));
   return 16 - Math.max(0, Math.min(16, h + wave));
 }
 
@@ -398,7 +417,7 @@ function surface(x: number, h: number, phase: number): number {
  * A liquid h rows deep over the whole display: a gradient up to the lowest row the surface comes down to, and over it
  * the rows the surface goes through as one bitmap, lit up to the surface in each column, its top pixel lighter.
  */
-function liquid(i: number, h: number, phase: number): Element[] {
+function liquid(i: number, h: number, motion: Motion): Element[] {
   if (h === 0) return [];
   const t = TANKS[i];
   const look = LIQUIDS[t.label];
@@ -419,7 +438,7 @@ function liquid(i: number, h: number, phase: number): Element[] {
     });
   }
   const tops: number[] = [];
-  for (let x = 0; x < 72; x++) tops.push(surface(x, h, phase));
+  for (let x = 0; x < 72; x++) tops.push(surface(x, h, motion));
   const top = Math.max(0, 16 - h - WAVE_AMP);
   const bitmap: string[] = [];
   for (let y = top; y <= Math.min(15, 16 - h + WAVE_AMP); y++) {
@@ -437,7 +456,7 @@ function liquid(i: number, h: number, phase: number): Element[] {
 function bubbles(motion: Motion, h: number): Element[] {
   const elements: Element[] = [];
   motion.bubbles.forEach((b, k) => {
-    if (b.y > 15 || b.y <= surface(b.x, h, motion.phase)) return;
+    if (b.y > 15 || b.y <= surface(b.x, h, motion)) return;
     elements.push({
       type: "rectangle",
       id: `bubble${k}`,
@@ -456,14 +475,17 @@ function bubbles(motion: Motion, h: number): Element[] {
 }
 
 /**
- * Moves the slosh on and every bubble a row up. One that reaches the surface starts again elsewhere a few steps under
- * the bottom, so the bubbles do not rise in step.
+ * Moves the slosh on, lets it die down or jolts it, and moves every bubble a row up. One that reaches the surface
+ * starts again elsewhere a few steps under the bottom, so the bubbles do not rise in step.
  */
 function step(motion: Motion, h: number): void {
-  motion.phase = (motion.phase + WAVE_STEP) % (2 * Math.PI);
+  motion.phase = (motion.phase + motion.pace) % (2 * Math.PI);
+  motion.slosh *= DAMP;
+  motion.ripple *= DAMP;
+  if (Math.random() < JOLT_CHANCE) jolt(motion);
   for (const b of motion.bubbles) {
     b.y -= 1;
-    if (b.y > surface(b.x, h, motion.phase)) continue;
+    if (b.y > surface(b.x, h, motion)) continue;
     b.x = 1 + Math.floor(Math.random() * 70);
     b.y = 15 + Math.floor(Math.random() * 6);
   }
@@ -697,7 +719,7 @@ function front(data: Telemetry | null, turning: Turning | null, view: number, mo
   const i = view - 1;
   const level = levels[i];
   const h = rows(level);
-  elements.push(...(i === WASTE ? heap(h) : liquid(i, h, motion.phase)));
+  elements.push(...(i === WASTE ? heap(h) : liquid(i, h, motion)));
   if (i === URINE) elements.push(...bubbles(motion, h));
   elements.push(...outlined("name", TANKS[i].label, 1, "mid_left"));
   elements.push(...outlined("value", level === null ? "--" : `${Math.round(level)}%`, 70, "mid_right"));
@@ -718,7 +740,8 @@ function main(): void {
   let loading = false;
   let stopped = false;
   let view = 0;
-  const motion: Motion = { phase: 0, bubbles: [] };
+  const motion: Motion = { phase: 0, pace: 0, slosh: 0, ripple: 0, bubbles: [] };
+  jolt(motion);
   for (let k = 0; k < BUBBLES; k++) {
     motion.bubbles.push({ x: 1 + Math.floor(Math.random() * 70), y: Math.floor(Math.random() * 16) });
   }
