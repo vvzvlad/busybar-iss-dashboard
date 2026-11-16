@@ -2,9 +2,9 @@
 
 Live ISS telemetry: the water tanks, cabin air, the solar arrays and a reboost alert.
 
-![The urine tank: yellow liquid at 36% sloshing, with bubbles rising](media/urine.gif)
+![The urine tank: yellow liquid at 38% sloshing, with bubbles rising](media/urine.gif)
 
-The International Space Station sends its telemetry to the ground, and NASA publishes part of it. The front display shows a piece of it at a time: the station's three water tanks, the air in the cabin, the solar arrays turning. Turn the wheel to change what you look at; the back display lists all the numbers at once. When the station fires its engines to raise its orbit, an alert takes over the display.
+The International Space Station sends its telemetry to the ground, and NASA publishes part of it. The front display shows a piece of it at a time: the station's three water tanks, the air in the cabin, the solar arrays turning. Turn the wheel to change what you look at; the back display lists all the numbers at once. When the station fires its engines to raise its orbit, an alert takes over the display, and then the liquids in the tanks lie against a wall until the burn is over.
 
 A JavaScript app for [BUSY Bar](https://busy.app).
 
@@ -14,13 +14,17 @@ The app starts on the three tanks of Node 3 side by side: the urine, the waste w
 
 ![URINE 36%, WASTE 49%, CLEAN 84%](media/tanks.png)
 
-The wheel then shows each tank on the whole display, filled to its level, with its name and level over it. The urine is yellow and sloshes, with bubbles rising through it.
+The wheel then shows each tank on the whole display, filled to its level, with its name and level over it. The urine is yellow, with bubbles rising through it. It lies under a flat surface that tilts when the liquid is kicked and swings back and forth like a pendulum, a swing in about 3 seconds, settling in about 10, with a small ripple rising and falling on it; however far it tilts, the liquid keeps its volume. What kicks it is the Slosh setting: jolts at random, or the station's gyroscopes.
+
+When an update finds more urine in the tank than the last one did while the urine tank is on the display, someone aboard has just used the toilet: for four seconds a thin stream pours in from the top with a trickling sound, the level rises from the old value to the new one, and the liquid sloshes.
+
+![A stream pouring into the urine tank, the level rising from 38% to 45%](media/stream.gif)
 
 The waste water is a garbage heap.
 
 ![The waste water tank: a garbage heap at 49%](media/waste.png)
 
-The clean water is blue and sloshes.
+The clean water is blue and sloshes the same way.
 
 ![The clean water tank at 84%](media/clean.gif)
 
@@ -36,9 +40,13 @@ Between two updates the arrays keep turning at the rate they turned between the 
 
 ![The wings getting shorter as the joints turn, sped up](media/arrays.gif)
 
-When the station's mode is Reboost, an alert with the station and its engine firing replaces any view. The first update that finds the reboost plays a sound and blinks the status light orange.
+When an update first finds the station's mode is Reboost, an alert with the station and its engine firing replaces any view for 10 seconds, with a sound and the status light blinking orange.
 
 ![REBOOST](media/reboost.png)
+
+Then the views come back. While the engines push the station, the urine and the clean water gather at the left wall of the display as a column, overshooting and sloshing on the way; when an update finds the reboost over, they flow back and slosh until they settle.
+
+![After the alert the urine runs to the left wall and stands there as a column; when the reboost is over it flows back](media/reboost-tank.gif)
 
 The back display lists every number: the three tanks, the states of the urine and the water processor, temperature, pressure, O2, N2, CO2, the beta angle, the station mode, and the age of the data, counted up from when the station sent it.
 
@@ -69,9 +77,17 @@ Without a connection and with nothing kept, every value is `--`, on the back dis
 | Wheel | Switches the view: the three tanks, the urine, the waste water, the clean water, cabin air, the solar arrays. |
 | Back | Leaves the app. |
 
+## Settings
+
+| Setting | What it does |
+| --- | --- |
+| Slosh | What sets the urine and the clean water sloshing. Random: jolts at random moments, every few seconds. Gyroscopes: the station's control moment gyroscopes, the spinning wheels that hold its attitude; each change of their control torque, about once a second, kicks the liquid as hard as the torque changed. Random by default. |
+
+With Gyroscopes, the liquids lie still while the station is out of touch with the ground: the torque does not change then. The app reads its settings when it starts.
+
 ## Data
 
-NASA's public ISS telemetry (ISSLIVE) from Lightstreamer's demo server, read over Lightstreamer HTTP requests every five minutes. The last good update is kept on the bar.
+NASA's public ISS telemetry (ISSLIVE) from Lightstreamer's demo server, read over Lightstreamer HTTP requests every five minutes. The last good update is kept on the bar. With the Slosh setting on Gyroscopes, while the urine or the clean water is on the display, the app also keeps one Lightstreamer session open for the gyroscopes' control torque and asks it for new values as soon as each answer comes, about once a second; after a failed request it starts again 10 seconds later.
 
 ## Build
 

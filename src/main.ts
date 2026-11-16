@@ -196,25 +196,50 @@ const TURN_MS = 1000;
  */
 const TURN_SPAN_MS = 20 * 60 * 1000;
 /**
- * The liquids slosh in place, nothing runs along the tank: the surface rises at one end as it falls at the other, and a
- * ripple of a third of the tank rises and falls on it twice as fast. They are jolted at random: on a step, with
- * JOLT_CHANCE, the slosh and the ripple get a random strength, up to SLOSH_MAX and RIPPLE_MAX rows, and the slosh a
- * random pace, how far it goes on a step, a whole slosh being 2π; between jolts both die down by DAMP a step.
- * WAVE_AMP, their sum, is the most rows the surface goes up or down from its level.
+ * A liquid lies under a straight surface tilted by an angle, radians, positive deeper at the left wall, which swings
+ * as a damped pendulum stepped every MOTION_MS: on a step its swing, radians a step, is pulled towards the angle of
+ * rest by SPRING of the angle off it and slowed by DRAG of itself, a swing of about 3 s that dies down in about 10 s.
+ * The angle of rest is level, and TILT_MAX while the station fires its engines for a reboost, pressing the liquid
+ * against the left wall. The surface is drawn no steeper than TILT_MAX, so the liquid stands at the wall as a column
+ * while the pendulum swings past that angle and back.
+ */
+const SPRING = 0.25;
+const DRAG = 0.14;
+const TILT_MAX = (88 * Math.PI) / 180;
+/**
+ * Kicks set it sloshing: an impulse to the swing in a random direction. At random, on a step with JOLT_CHANCE, up to
+ * KICK, which swings the surface about 1.6 rows up and down at the walls; or by the station's control moment
+ * gyroscopes, GYRO_GAIN for each unit their control torque changed by. A ripple of a third of the tank rises and falls
+ * on the surface twice as fast as the slosh, PACE of its phase a step: a kick of KICK raises it to RIPPLE_MAX rows, a
+ * weaker one less, and it dies down by DAMP a step.
  */
 const JOLT_CHANCE = 0.04;
-const SLOSH_MAX = 1.4;
+const KICK = 0.03;
+const GYRO_GAIN = 0.2;
 const RIPPLE_MAX = 0.6;
 const DAMP = 0.97;
-const WAVE_AMP = 2;
-/** Across the tank, column by column, the shape of the slosh and of the ripple: cos(πx/71) and cos(3πx/71). */
-const SLOSH: number[] = [];
+const PACE = Math.PI / 6;
+/** Across the tank, column by column, the shape of the ripple: cos(3πx/71). */
 const RIPPLE: number[] = [];
-for (let x = 0; x < 72; x++) {
-  SLOSH.push(Math.cos((Math.PI * x) / 71));
-  RIPPLE.push(Math.cos((3 * Math.PI * x) / 71));
-}
+for (let x = 0; x < 72; x++) RIPPLE.push(Math.cos((3 * Math.PI * x) / 71));
+/** A row of the liquid's bitmap with nothing lit. */
+const EMPTY_ROW = ".".repeat(72);
 const BUBBLES = 5;
+/**
+ * When a poll finds the urine tank fuller than the last one did while it is on the display, a stream falls into it
+ * for POUR_MS from the top to the surface at column POUR_X, and the level is drawn rising from the old one.
+ */
+const POUR_MS = 4000;
+const POUR_X = 36;
+/** The reboost alert covers the front for this long from the poll that finds the reboost, then the views come back. */
+const ALERT_MS = 10 * 1000;
+/**
+ * The control torque of the station's control moment gyroscopes about roll, pitch and yaw, updated about once a
+ * second: what kicks the liquids with the Gyroscopes setting.
+ */
+const TORQUE = ["USLAB000006", "USLAB000007", "USLAB000008"];
+/** The torque stream starts again this long after it fails. */
+const RETRY_MS = 10 * 1000;
 
 /** Trash for the garbage heap as XPM colours: dirt and cardboard most of all, then metal, glass, rust, paper, plastic. */
 const TRASH = ["a c #5A3A1E", "b c #3A2614", "c c #8A6A3A", "d c #707070", "e c #3E6A2A", "f c #A0401E", "g c #B8B0A0", "h c #3858A0"];
@@ -231,12 +256,8 @@ async function post(path: string, body: string): Promise<string> {
   return res.text();
 }
 
-/**
- * Reads the values of ITEMS by channel: a session, a subscription with a snapshot, and one poll that brings the
- * snapshot and the updates that came with it as lines "U,1,<position in the group>,<value>"; the last of a
- * channel wins. A channel missing from the answer is left out; an answer without any is a failed poll.
- */
-async function load(): Promise<Record<string, number>> {
+/** A session subscribed to the channels with a snapshot; resolves to its id. */
+async function subscribe(items: string[]): Promise<string> {
   const created = await post(
     `create_session.txt?${PROTOCOL}`,
     `LS_cid=${CID}&LS_adapter_set=ISSLIVE&LS_polling=true&LS_polling_millis=0&LS_idle_millis=0`,
@@ -244,27 +265,59 @@ async function load(): Promise<Record<string, number>> {
   const session = /^CONOK,([^,\r\n]+)/.exec(created);
   if (!session) throw new Error(`no session: ${created.slice(0, 40)}`);
 
-  const group = ITEMS.join("%20");
+  const group = items.join("%20");
   const subscribed = await post(
     `control.txt?${PROTOCOL}&LS_session=${session[1]}`,
     `LS_reqId=1&LS_op=add&LS_subId=1&LS_mode=MERGE&LS_group=${group}&LS_schema=Value&LS_snapshot=true`,
   );
   if (subscribed.indexOf("REQOK") < 0) throw new Error(`not subscribed: ${subscribed.slice(0, 40)}`);
+  return session[1];
+}
 
-  const bound = await post(
+/** One poll of a session: the snapshot, or the updates since the last poll, waiting up to 3 s for one. */
+function bind(session: string): Promise<string> {
+  return post(
     `bind_session.txt?${PROTOCOL}`,
-    `LS_session=${session[1]}&LS_polling=true&LS_polling_millis=0&LS_idle_millis=3000`,
+    `LS_session=${session}&LS_polling=true&LS_polling_millis=0&LS_idle_millis=3000`,
   );
-  const values: Record<string, number> = {};
+}
+
+/**
+ * Every update in a poll's answer, lines "U,1,<position in the group>,<value>", in their order; values that are not
+ * numbers are left out.
+ */
+function updates(bound: string, take: (position: number, value: number) => void): void {
   for (const line of bound.split("\n")) {
     const update = /^U,1,(\d+),([^\r]*)/.exec(line);
     if (!update) continue;
     const value = parseFloat(update[2]);
-    const item = ITEMS[Number(update[1]) - 1];
-    if (item !== undefined && isFinite(value)) values[item] = value;
+    if (isFinite(value)) take(Number(update[1]), value);
   }
+}
+
+/**
+ * Reads the values of ITEMS by channel: a session and one poll that brings the snapshot and the updates that came
+ * with it; the last of a channel wins. A channel missing from the answer is left out; an answer without any is a
+ * failed poll.
+ */
+async function load(): Promise<Record<string, number>> {
+  const bound = await bind(await subscribe(ITEMS));
+  const values: Record<string, number> = {};
+  updates(bound, (position, value) => {
+    const item = ITEMS[position - 1];
+    if (item !== undefined) values[item] = value;
+  });
   if (Object.keys(values).length === 0) throw new Error(`no values: ${bound.slice(0, 40)}`);
   return values;
+}
+
+/** What kicks the liquids, the Slosh setting: random jolts, or the gyroscopes' torque streamed live. */
+type Slosh = "random" | "gyros";
+
+/** The Slosh setting; random unless it says gyros. */
+async function loadSlosh(): Promise<Slosh> {
+  const { values } = await device.AppsSettingsGet({ app_id: APP });
+  return values.slosh === "gyros" ? "gyros" : "random";
 }
 
 /** One good poll: when it was (Date.now() ms) and the values by channel. */
@@ -388,48 +441,100 @@ function tank(i: number, level: number | null): Element[] {
 }
 
 /**
- * The motion of the liquids: the phase of the slosh, its pace a step, its strength and the ripple's in rows, and the
- * bubbles in the urine, by column and row.
+ * The motion of the liquids: the tilt of the surface and its swing (see SPRING), the ripple's phase and strength in
+ * rows, the top lit row of each column as last drawn (16 for an empty one), the bubbles in the urine by column and
+ * row, and the stream into the urine: the level it started from and when it ends, Date.now() ms.
  */
 interface Motion {
+  tilt: number;
+  swing: number;
   phase: number;
-  pace: number;
-  slosh: number;
   ripple: number;
+  tops: number[];
   bubbles: { x: number; y: number }[];
+  pourFrom: number;
+  pourUntil: number;
 }
 
-/** A jolt: the slosh and the ripple get a random strength, at least what is left of the last one, and a random pace. */
-function jolt(motion: Motion): void {
-  motion.slosh = Math.max(motion.slosh, SLOSH_MAX * (0.3 + 0.7 * Math.random()));
-  motion.ripple = Math.max(motion.ripple, RIPPLE_MAX * Math.random());
-  motion.pace = 0.35 + 0.3 * Math.random();
+/** A kick: an impulse to the swing in a random direction, and the ripple raised for its strength. */
+function kick(motion: Motion, impulse: number): void {
+  motion.swing += Math.random() < 0.5 ? -impulse : impulse;
+  motion.ripple = Math.max(motion.ripple, RIPPLE_MAX * Math.min(1, impulse / KICK));
 }
 
-/** The top lit row of column x of a liquid h rows deep: the level, raised or lowered there by the slosh. */
-function surface(x: number, h: number, motion: Motion): number {
-  const p = motion.phase;
-  const wave = Math.round(motion.slosh * SLOSH[x] * Math.sin(p) + motion.ripple * RIPPLE[x] * Math.sin(2 * p));
-  return 16 - Math.max(0, Math.min(16, h + wave));
+/** The integral of the depth clamp(w, 0, 16) from -∞ to v. */
+function under(v: number): number {
+  return v <= 0 ? 0 : v <= 16 ? (v * v) / 2 : 128 + 16 * (v - 16);
 }
 
 /**
- * A liquid h rows deep over the whole display: a gradient up to the lowest row the surface comes down to, and over it
- * the rows the surface goes through as one bitmap, lit up to the surface in each column, its top pixel lighter.
+ * The area under the surface a - slope·(x - 36) over the 72 columns, its depth clamped to the 16 rows, in closed
+ * form: with w = a - slope·(x - 36), the integral of the depth over x is that of clamp(w, 0, 16) over w divided by
+ * the slope.
  */
-function liquid(i: number, h: number, motion: Motion): Element[] {
-  if (h === 0) return [];
+function area(a: number, slope: number): number {
+  const s = 36 * Math.abs(slope);
+  // A surface this close to level: the closed form would divide by next to nothing.
+  return s < 1e-6 ? 72 * Math.max(0, Math.min(16, a)) : ((under(a + s) - under(a - s)) * 36) / s;
+}
+
+/**
+ * The top lit row of each column of a liquid at a level, percent, 16 for an empty column: the surface at the motion's
+ * tilt, no steeper than TILT_MAX, is as high as leaves the level's share of the display under it, found by halving
+ * the range of heights 20 times; the ripple moves it up and down.
+ */
+function surface(level: number, motion: Motion): number[] {
+  const slope = Math.tan(Math.max(-TILT_MAX, Math.min(TILT_MAX, motion.tilt)));
+  const target = (Math.max(0, Math.min(100, level)) * 72 * 16) / 100;
+  let low = -36 * Math.abs(slope);
+  let high = 16 - low;
+  for (let k = 0; k < 20; k++) {
+    const middle = (low + high) / 2;
+    if (area(middle, slope) < target) low = middle;
+    else high = middle;
+  }
+  const a = (low + high) / 2;
+  const wave = motion.ripple * Math.sin(2 * motion.phase);
+  const tops: number[] = [];
+  // An empty tank stays empty: the ripple would light a few pixels on the bottom row.
+  if (target === 0) {
+    for (let x = 0; x < 72; x++) tops.push(16);
+    return tops;
+  }
+  for (let x = 0; x < 72; x++) {
+    const depth = Math.round(a - slope * (x - 35.5) + wave * RIPPLE[x]);
+    tops.push(16 - Math.max(0, Math.min(16, depth)));
+  }
+  return tops;
+}
+
+/**
+ * A liquid over the whole display with the tops of its columns: the rows the surface goes through as one bitmap, lit
+ * from the surface down in each column, its top pixel lighter, and under the lowest of them a gradient.
+ */
+function liquid(i: number, tops: number[]): Element[] {
   const t = TANKS[i];
   const look = LIQUIDS[t.label];
+  // The columns whose top is on each row, the empty ones on row 16.
+  const on: number[][] = [];
+  for (let y = 0; y <= 16; y++) on.push([]);
+  let top = 16;
+  let bottom = 0;
+  for (let x = 0; x < 72; x++) {
+    on[tops[x]].push(x);
+    top = Math.min(top, tops[x]);
+    bottom = Math.max(bottom, tops[x]);
+  }
+  if (top === 16) return [];
   const elements: Element[] = [];
-  if (h > WAVE_AMP + 1) {
+  if (bottom < 15) {
     elements.push({
       type: "rectangle",
       id: "body",
       x: 0,
-      y: 17 - h + WAVE_AMP,
+      y: bottom + 1,
       width: 72,
-      height: h - 1 - WAVE_AMP,
+      height: 15 - bottom,
       fill: "gradient_v",
       fill_colors: [t.color, look.deep],
       border_width: 0,
@@ -437,26 +542,43 @@ function liquid(i: number, h: number, motion: Motion): Element[] {
       z_index: 0,
     });
   }
-  const tops: number[] = [];
-  for (let x = 0; x < 72; x++) tops.push(surface(x, h, motion));
-  const top = Math.max(0, 16 - h - WAVE_AMP);
-  const bitmap: string[] = [];
-  for (let y = top; y <= Math.min(15, 16 - h + WAVE_AMP); y++) {
-    let row = "";
-    for (let x = 0; x < 72; x++) row += y < tops[x] ? "." : y === tops[x] ? "c" : "b";
-    bitmap.push(row);
+  // Rows from the top down: a column is empty above its top and lit under it, so a row differs from the one above only
+  // in the columns whose top is on it or on the row above, and the bitmap is not built cell by cell.
+  const last = Math.min(15, bottom);
+  const cells = EMPTY_ROW.split("");
+  const data = ["! XPM2", `72 ${last - top + 1} 3 1`, ". c none", `b c ${t.color.slice(0, 7)}`, `c c ${look.crest}`];
+  for (let y = top; y <= last; y++) {
+    if (y > top) for (const x of on[y - 1]) cells[x] = "b";
+    for (const x of on[y]) cells[x] = "c";
+    data.push(cells.join(""));
   }
-  const data = ["! XPM2", `72 ${bitmap.length} 3 1`, ". c none", `b c ${t.color.slice(0, 7)}`, `c c ${look.crest}`, ...bitmap];
   // Without an explicit z_index the firmware drew a new bitmap over the text in the first frame (emulator, 1.3.1).
   elements.push({ type: "xpmbitmap", id: "surface", data: data.join("\n"), x: 0, y: top, align: "top_left", z_index: 0 });
   return elements;
 }
 
-/** The bubbles that are on the display and under the surface, a pixel each. */
-function bubbles(motion: Motion, h: number): Element[] {
+/**
+ * The stream into the urine: a pixel a row from the top of the display down to the surface at POUR_X, each row a
+ * column either way of it as the stream wiggles, every third row lighter, the light rows running down.
+ */
+function pour(tops: number[], now: number): Element[] {
+  const depth = tops[POUR_X];
+  if (depth === 0) return [];
+  const tick = Math.floor(now / MOTION_MS);
+  const data = ["! XPM2", `3 ${depth} 3 1`, ". c none", `b c ${TANKS[URINE].color.slice(0, 7)}`, `c c ${LIQUIDS.URINE.crest}`];
+  for (let y = 0; y < depth; y++) {
+    const pixel = (y - tick) % 3 === 0 ? "c" : "b";
+    const side = Math.round(Math.sin(y * 0.9 + tick * 1.3));
+    data.push(side < 0 ? `${pixel}..` : side > 0 ? `..${pixel}` : `.${pixel}.`);
+  }
+  return [{ type: "xpmbitmap", id: "pour", data: data.join("\n"), x: POUR_X - 1, y: 0, align: "top_left", z_index: 1 }];
+}
+
+/** The bubbles that are on the display and under the surface as last drawn, a pixel each. */
+function bubbles(motion: Motion): Element[] {
   const elements: Element[] = [];
   motion.bubbles.forEach((b, k) => {
-    if (b.y > 15 || b.y <= surface(b.x, h, motion)) return;
+    if (b.y > 15 || b.y <= motion.tops[b.x]) return;
     elements.push({
       type: "rectangle",
       id: `bubble${k}`,
@@ -475,17 +597,19 @@ function bubbles(motion: Motion, h: number): Element[] {
 }
 
 /**
- * Moves the slosh on, lets it die down or jolts it, and moves every bubble a row up. One that reaches the surface
- * starts again elsewhere a few steps under the bottom, so the bubbles do not rise in step.
+ * Swings the surface on, towards TILT_MAX in a reboost and level otherwise, lets the ripple die down, kicks the swing
+ * at random when `random` says so, and moves every bubble a row up. One that reaches the surface as last drawn starts
+ * again elsewhere a few steps under the bottom, so the bubbles do not rise in step.
  */
-function step(motion: Motion, h: number): void {
-  motion.phase = (motion.phase + motion.pace) % (2 * Math.PI);
-  motion.slosh *= DAMP;
+function step(motion: Motion, reboost: boolean, random: boolean): void {
+  motion.swing -= SPRING * (motion.tilt - (reboost ? TILT_MAX : 0)) + DRAG * motion.swing;
+  motion.tilt += motion.swing;
+  motion.phase = (motion.phase + PACE) % (2 * Math.PI);
   motion.ripple *= DAMP;
-  if (Math.random() < JOLT_CHANCE) jolt(motion);
+  if (random && Math.random() < JOLT_CHANCE) kick(motion, KICK * (0.3 + 0.7 * Math.random()));
   for (const b of motion.bubbles) {
     b.y -= 1;
-    if (b.y > surface(b.x, h, motion)) continue;
+    if (b.y > motion.tops[b.x]) continue;
     b.x = 1 + Math.floor(Math.random() * 70);
     b.y = 15 + Math.floor(Math.random() * 6);
   }
@@ -679,20 +803,20 @@ function dim(e: Element): Element {
 }
 
 /**
- * Both displays: the view the wheel is on, or the reboost alert in its place while the station mode is Reboost, and
- * the back display as back() made it after the poll. Values that are not live, kept from an earlier poll or frozen by a
- * loss of signal, are dimmed; after a failed poll the no-connection picture is in a corner of the front.
+ * Both displays: the view the wheel is on, or the reboost alert in its place while `alerting`, and the back display as
+ * back() made it after the poll. Values that are not live, kept from an earlier poll or frozen by a loss of signal,
+ * are dimmed; after a failed poll the no-connection picture is in a corner of the front.
  */
 function frame(
   data: Telemetry | null,
   link: Link,
   turning: Turning | null,
   view: number,
+  alerting: boolean,
   motion: Motion,
   now: number,
   backside: Element[],
 ): Element[] {
-  const alerting = value(data, MODE) === REBOOST;
   const elements = alerting ? alert() : front(data, turning, view, motion, now);
   const shown = live(data, link) ? elements : elements.map(dim);
   if (link === "lost") {
@@ -704,8 +828,9 @@ function frame(
 
 /**
  * The view the wheel is on: the three tanks side by side, or one tank on the whole display with its label and level
- * over it — the urine yellow with rising bubbles, the waste a garbage heap, the clean water blue; or cabin air, or the
- * solar arrays.
+ * over it — the urine yellow with rising bubbles and, while a stream pours into it, its level rising to the new one,
+ * the waste a garbage heap, the clean water blue; or cabin air, or the solar arrays. The liquid's surface is kept in
+ * the motion, for the bubbles to rise to.
  */
 function front(data: Telemetry | null, turning: Turning | null, view: number, motion: Motion, now: number): Element[] {
   if (view === WEATHER_VIEW) return weather(data);
@@ -717,10 +842,17 @@ function front(data: Telemetry | null, turning: Turning | null, view: number, mo
     return elements;
   }
   const i = view - 1;
-  const level = levels[i];
-  const h = rows(level);
-  elements.push(...(i === WASTE ? heap(h) : liquid(i, h, motion)));
-  if (i === URINE) elements.push(...bubbles(motion, h));
+  let level = levels[i];
+  const pouring = i === URINE && now < motion.pourUntil;
+  if (pouring && level !== null) level -= ((level - motion.pourFrom) * (motion.pourUntil - now)) / POUR_MS;
+  if (i === WASTE) {
+    elements.push(...heap(rows(level)));
+  } else {
+    motion.tops = surface(level ?? 0, motion);
+    elements.push(...liquid(i, motion.tops));
+  }
+  if (i === URINE) elements.push(...bubbles(motion));
+  if (pouring) elements.push(...pour(motion.tops, now));
   elements.push(...outlined("name", TANKS[i].label, 1, "mid_left"));
   elements.push(...outlined("value", level === null ? "--" : `${Math.round(level)}%`, 70, "mid_right"));
   return elements;
@@ -737,30 +869,40 @@ function main(): void {
   let backside = back(data, link);
   // Whether the reboost under way has had its sound and blink.
   let alerted = false;
+  // The urine level of this run's last good poll: the kept one may be days old, and a rise since then is no stream.
+  let lastUrine: number | null = null;
+  // Whether the reboost alert covers the front, and the timer that takes it off.
+  let alerting = false;
+  let alertTimer: ReturnType<typeof setTimeout> | undefined;
   let loading = false;
   let stopped = false;
   let view = 0;
-  const motion: Motion = { phase: 0, pace: 0, slosh: 0, ripple: 0, bubbles: [] };
-  jolt(motion);
+  let slosh: Slosh = "random";
+  const motion: Motion = { tilt: 0, swing: 0, phase: 0, ripple: 0, tops: [], bubbles: [], pourFrom: 0, pourUntil: 0 };
+  for (let x = 0; x < 72; x++) motion.tops.push(16);
   for (let k = 0; k < BUBBLES; k++) {
     motion.bubbles.push({ x: 1 + Math.floor(Math.random() * 70), y: Math.floor(Math.random() * 16) });
   }
   let motionTimer: ReturnType<typeof setInterval> | undefined;
   let motionPeriod = 0;
+  // Whether a torque stream is going, and the timer that starts it again after a failure.
+  let following = false;
+  let retry: ReturnType<typeof setTimeout> | undefined;
 
   const report = (err: unknown) =>
     console.error(`${APP}: ${err instanceof Error ? err.message : String(err)}`);
   const screen = createScreen(APP, report);
-  const redraw = (led?: string) => screen.show(frame(data, link, turning, view, motion, Date.now(), backside), led);
+  const redraw = (led?: string) => screen.show(frame(data, link, turning, view, alerting, motion, Date.now(), backside), led);
+  // A liquid is on the front: the urine or the clean water, with no alert over it.
+  const sloshing = () => !stopped && !alerting && view > 0 && view <= TANKS.length && view - 1 !== WASTE;
 
   // The motion timer runs only while something on the display moves: a liquid sloshes, or the solar arrays turn. The
-  // reboost alert stops it, being drawn in the view's place.
+  // reboost alert stops it, being drawn in the view's place. With the Gyroscopes setting a liquid on the front also
+  // keeps the torque stream going.
   function animate(): void {
     let period = 0;
-    if (value(data, MODE) !== REBOOST) {
-      if (view > 0 && view <= TANKS.length && view - 1 !== WASTE) period = MOTION_MS;
-      else if (view === ARRAYS_VIEW && turning !== null) period = TURN_MS;
-    }
+    if (sloshing()) period = MOTION_MS;
+    else if (!alerting && view === ARRAYS_VIEW && turning !== null) period = TURN_MS;
     if (motionTimer !== undefined && period !== motionPeriod) {
       clearInterval(motionTimer);
       motionTimer = undefined;
@@ -768,22 +910,63 @@ function main(): void {
     if (period > 0 && motionTimer === undefined) {
       motionPeriod = period;
       motionTimer = setInterval(() => {
-        if (view !== ARRAYS_VIEW) step(motion, rows(value(data, TANKS[view - 1].item)));
+        if (view !== ARRAYS_VIEW) step(motion, value(data, MODE) === REBOOST, slosh === "random");
         redraw();
       }, period);
     }
+    if (slosh === "gyros" && sloshing() && !following && retry === undefined) void follow().catch(report);
+  }
+
+  // The torque stream: one session subscribed to the gyroscopes' control torque, bound again as soon as each poll of it
+  // answers, while a liquid is on the front; each answer with a change kicks the slosh by how much the torque changed,
+  // all three axes together. It stops at the first answer after the liquid leaves the front; a failure starts it again
+  // RETRY_MS later.
+  async function follow(): Promise<void> {
+    following = true;
+    try {
+      const session = await subscribe(TORQUE);
+      // The last torque by position in the group.
+      const torque: Record<number, number> = {};
+      while (sloshing()) {
+        const bound = await bind(session);
+        // An answer that does not end in LOOP ends the session: CONERR or END.
+        if (bound.indexOf("LOOP") < 0) throw new Error(`torque: ${bound.slice(0, 40)}`);
+        let change = 0;
+        updates(bound, (position, value) => {
+          if (position in torque) change += Math.abs(value - torque[position]);
+          torque[position] = value;
+        });
+        if (change > 0 && sloshing()) kick(motion, GYRO_GAIN * change);
+      }
+    } catch (err) {
+      report(err);
+      if (!stopped) {
+        retry = setTimeout(() => {
+          retry = undefined;
+          animate();
+        }, RETRY_MS);
+      }
+    }
+    following = false;
   }
 
   // One poll at a time. A good one is kept in localStorage; a failed one leaves the last good one on the display,
-  // dimmed. The first poll to find the station in Reboost sounds the alert and blinks the LED.
+  // dimmed. The first poll to find the station in Reboost sounds the alert, blinks the LED and covers the front with
+  // the alert for ALERT_MS. A good poll that finds the urine tank fuller than the last one did while it is on the
+  // front pours a stream into it, with its sound.
   async function poll(): Promise<void> {
     if (loading) return;
     loading = true;
     let rising = false;
+    // The urine level the stream pours from: the last good poll's, lower than this one's.
+    let poured: number | null = null;
     try {
       const next: Telemetry = { at: Date.now(), values: await load() };
       // A poll that is already stale brings angles frozen at the loss of signal: the arrays stop there.
       turning = stale(next) ? null : turn(data, next);
+      const after = value(next, TANKS[URINE].item);
+      if (lastUrine !== null && after !== null && after > lastUrine) poured = lastUrine;
+      lastUrine = after;
       data = next;
       link = "ok";
       const reboost = value(next, MODE) === REBOOST;
@@ -802,10 +985,38 @@ function main(): void {
     loading = false;
     if (stopped) return;
     backside = back(data, link);
+    if (rising) {
+      alerting = true;
+      alertTimer = setTimeout(() => {
+        alertTimer = undefined;
+        alerting = false;
+        animate();
+        redraw();
+      }, ALERT_MS);
+    }
+    if (poured !== null && view === URINE + 1 && !alerting) {
+      motion.pourFrom = poured;
+      motion.pourUntil = Date.now() + POUR_MS;
+      kick(motion, KICK);
+      void device.AudioPlay({ application_name: APP, path: "sounds/pour.snd" }).catch(report);
+    }
     animate();
     if (rising) void device.AudioPlay({ application_name: APP, path: "sounds/reboost.snd" }).catch(report);
     redraw(rising ? ALERT : undefined);
   }
+
+  // The Slosh setting, read once at the start; until it is read, and when it cannot be, the liquids are kicked at
+  // random. Kicked at random, they get a first kick at once, to slosh when first shown.
+  void (async () => {
+    try {
+      slosh = await loadSlosh();
+    } catch (err) {
+      report(err);
+    }
+    if (stopped) return;
+    if (slosh === "random") kick(motion, KICK);
+    animate();
+  })().catch(report);
 
   redraw();
   void poll();
@@ -827,6 +1038,8 @@ function main(): void {
     screen.close();
     clearInterval(timer);
     if (motionTimer !== undefined) clearInterval(motionTimer);
+    if (alertTimer !== undefined) clearTimeout(alertTimer);
+    if (retry !== undefined) clearTimeout(retry);
 
     // Not detached from inside the handler itself: with nothing else left the unbind stops the app on the spot, while this handler is still running.
     setTimeout(unbind, 0);
