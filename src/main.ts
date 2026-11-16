@@ -195,9 +195,20 @@ const TURN_MS = 1000;
  * shorter way round to be the one it took.
  */
 const TURN_SPAN_MS = 20 * 60 * 1000;
-/** Length of the surface wave and how far it moves a step. */
-const WAVE_PX = 24;
+/**
+ * The liquids slosh in place, nothing runs along the tank: the surface rises at one end as it falls at the other, and a
+ * ripple of a third of the tank rises and falls on it twice as fast. WAVE_STEP is how far the slosh goes on a step, a
+ * whole one being 2π; WAVE_AMP the most rows the surface goes up or down from its level.
+ */
 const WAVE_STEP = 0.5;
+const WAVE_AMP = 2;
+/** Across the tank, column by column, the shape of the slosh and of the ripple: cos(πx/71) and cos(3πx/71). */
+const SLOSH: number[] = [];
+const RIPPLE: number[] = [];
+for (let x = 0; x < 72; x++) {
+  SLOSH.push(Math.cos((Math.PI * x) / 71));
+  RIPPLE.push(Math.cos((3 * Math.PI * x) / 71));
+}
 const BUBBLES = 5;
 
 /** Trash for the garbage heap as XPM colours: dirt and cardboard most of all, then metal, glass, rust, paper, plastic. */
@@ -371,35 +382,35 @@ function tank(i: number, level: number | null): Element[] {
   return elements;
 }
 
-/** The motion of the liquids: the phase of the surface wave and the bubbles in the urine, by column and row. */
+/** The motion of the liquids: the phase of the slosh and the bubbles in the urine, by column and row. */
 interface Motion {
   phase: number;
   bubbles: { x: number; y: number }[];
 }
 
-/** The top lit row of column x of a liquid h rows deep: the level with a wave of a pixel up and down on it. */
+/** The top lit row of column x of a liquid h rows deep: the level, raised or lowered there by the slosh. */
 function surface(x: number, h: number, phase: number): number {
-  const wave = Math.round(Math.sin((x * 2 * Math.PI) / WAVE_PX + phase));
+  const wave = Math.round(1.4 * SLOSH[x] * Math.sin(phase) + 0.6 * RIPPLE[x] * Math.sin(2 * phase));
   return 16 - Math.max(0, Math.min(16, h + wave));
 }
 
 /**
- * A liquid h rows deep over the whole display: a gradient up to two rows under the level, and over it the rows the
- * wave goes through as one bitmap, lit up to the surface in each column, its top pixel lighter.
+ * A liquid h rows deep over the whole display: a gradient up to the lowest row the surface comes down to, and over it
+ * the rows the surface goes through as one bitmap, lit up to the surface in each column, its top pixel lighter.
  */
 function liquid(i: number, h: number, phase: number): Element[] {
   if (h === 0) return [];
   const t = TANKS[i];
   const look = LIQUIDS[t.label];
   const elements: Element[] = [];
-  if (h > 2) {
+  if (h > WAVE_AMP + 1) {
     elements.push({
       type: "rectangle",
       id: "body",
       x: 0,
-      y: 18 - h,
+      y: 17 - h + WAVE_AMP,
       width: 72,
-      height: h - 2,
+      height: h - 1 - WAVE_AMP,
       fill: "gradient_v",
       fill_colors: [t.color, look.deep],
       border_width: 0,
@@ -409,9 +420,9 @@ function liquid(i: number, h: number, phase: number): Element[] {
   }
   const tops: number[] = [];
   for (let x = 0; x < 72; x++) tops.push(surface(x, h, phase));
-  const top = Math.max(0, 15 - h);
+  const top = Math.max(0, 16 - h - WAVE_AMP);
   const bitmap: string[] = [];
-  for (let y = top; y <= Math.min(15, 17 - h); y++) {
+  for (let y = top; y <= Math.min(15, 16 - h + WAVE_AMP); y++) {
     let row = "";
     for (let x = 0; x < 72; x++) row += y < tops[x] ? "." : y === tops[x] ? "c" : "b";
     bitmap.push(row);
@@ -445,7 +456,7 @@ function bubbles(motion: Motion, h: number): Element[] {
 }
 
 /**
- * Moves the wave on and every bubble a row up. One that reaches the surface starts again elsewhere a few steps under
+ * Moves the slosh on and every bubble a row up. One that reaches the surface starts again elsewhere a few steps under
  * the bottom, so the bubbles do not rise in step.
  */
 function step(motion: Motion, h: number): void {

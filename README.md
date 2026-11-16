@@ -2,7 +2,7 @@
 
 Live ISS telemetry: the water tanks, cabin air, the solar arrays and a reboost alert.
 
-![The urine tank: yellow liquid at 36% with a wave on it and rising bubbles](media/urine.gif)
+![The urine tank: yellow liquid at 36% sloshing, with bubbles rising](media/urine.gif)
 
 The International Space Station sends its telemetry to the ground, and NASA publishes part of it. The front display shows a piece of it at a time: the station's three water tanks, the air in the cabin, the solar arrays turning. Turn the wheel to change what you look at; the back display lists all the numbers at once. When the station fires its engines to raise its orbit, an alert takes over the display.
 
